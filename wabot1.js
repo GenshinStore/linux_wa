@@ -17,8 +17,6 @@ const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 const ENABLE_FORWARD_TO_SECONDARY = true; 
 const DELAY_MS = 1000; 
 
-// SETTING DURASI ANTI-DUPLIKAT (Dalam Menit)
-// Silakan ubah angka di bawah ini sesuai keinginan Anda (misal: 1 atau 5)
 const CACHE_TTL_MINUTES = 1; 
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
@@ -28,10 +26,9 @@ const BOT_ID = String(process.env.BOT_ID || '1').replace(/[^a-zA-Z0-9_-]/g, '');
 const SESSION_PATH = `auth_info_bot${BOT_ID}`;
 let sock;
 
-// ================= SISTEM ANTI-DUPLIKAT LINTAS BOT (SUPER RINGAN) =================
+// ================= SISTEM ANTI-DUPLIKAT LINTAS BOT =================
 const HISTORY_DIR = path.join(__dirname, 'history_links');
 
-// Buat folder jika belum ada, atau sapu bersih sisa cache jika bot direstart
 if (!fs.existsSync(HISTORY_DIR)) {
     fs.mkdirSync(HISTORY_DIR, { recursive: true });
 } else {
@@ -51,7 +48,6 @@ function isDuplicate(link) {
         const fd = fs.openSync(historyFile, 'wx');
         fs.closeSync(fd);
         
-        // Hapus file secara realtime tepat setelah durasi menit habis
         setTimeout(() => {
             try { if (fs.existsSync(historyFile)) fs.unlinkSync(historyFile); } catch (e) {}
         }, CACHE_TTL_MS);
@@ -169,7 +165,7 @@ async function startBot() {
                 process.exit(1);
             }
         } else if (connection === 'open') {
-            console.log(`⚡ BOT ${BOT_ID} READY! (2 Grup | Realtime Cache: ${CACHE_TTL_MINUTES} mnt)`);
+            console.log(`⚡ BOT ${BOT_ID} READY! (Mendukung Channel WA)`);
             resetWatchdog();
         }
     });
@@ -180,10 +176,9 @@ async function startBot() {
         if (!msg.message || msg.key.fromMe) return;
 
         const from = msg.key.remoteJid;
-        if (!from || from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID || !from.includes('@')) return;
-
-        const timestamp = msg.messageTimestamp;
-        if (timestamp < Math.floor(Date.now() / 1000) - 60) return;
+        
+        // Cek ID pengirim (Abaikan jika dari grup tujuan)
+        if (!from || from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID) return;
 
         resetWatchdog();
 
@@ -203,11 +198,15 @@ async function startBot() {
         if (imageMsg || stickerMsg) {
             const mediaMsg = imageMsg || stickerMsg;
             const mediaType = imageMsg ? 'image' : 'sticker';
+            const sourceInfo = from.includes('@newsletter') ? 'Channel' : 'Grup/PM';
+
+            console.log(`[BOT ${BOT_ID}] 🔍 Mendeteksi ${mediaType} dari ${sourceInfo}...`);
 
             downloadMedia(mediaMsg, mediaType).then(buffer => {
                 detectQR(buffer).then(qrData => {
                     if (qrData && VALID_DOMAINS.test(qrData)) {
                         if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) return;
+                        console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
                         sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
                     }
                 }).catch(() => {});
@@ -241,7 +240,6 @@ scheduleDailyTask(5, 0, () => { startBot(); });
 // ================= WATCHDOG =================
 let lastActivityTime = Date.now();
 const MAX_IDLE_TIME = 120 * 60 * 1000; 
-
 function resetWatchdog() { lastActivityTime = Date.now(); }
 
 setInterval(() => {
