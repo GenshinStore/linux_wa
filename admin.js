@@ -156,7 +156,7 @@ async function startAdminBot() {
                     version,
                     auth: clientState,
                     logger: pino({ level: 'silent' }),
-                    browser: [`Setup Bot ${newBotId}`, 'Chrome', '1.0.0'],
+                    browser: [`Atmojo ${newBotId}`, 'Chrome', '1.0.0'],
                     getMessage: async () => ({ conversation: '' }),
                     connectTimeoutMs: 60000,
                     keepAliveIntervalMs: 10000
