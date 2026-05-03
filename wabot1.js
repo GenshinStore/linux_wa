@@ -127,13 +127,40 @@ async function detectQR(buffer) {
 }
 
 // ================= DOWNLOAD MEDIA =================
-async function downloadMedia(message, type) {
-    const stream = await downloadContentFromMessage(message, type);
-    let buffer = Buffer.from([]);
-    for await (const chunk of stream) {
-        buffer = Buffer.concat([buffer, chunk]);
+const https = require('https'); // Modul bawaan Node.js untuk download jalur publik
+
+async function downloadMedia(mediaMsg, type) {
+    try {
+        // 1. Jika dari Grup/PM (Dienkripsi E2E, punya mediaKey)
+        if (mediaMsg.mediaKey) {
+            const stream = await downloadContentFromMessage(mediaMsg, type);
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+            }
+            return buffer;
+        } 
+        
+        // 2. Jika dari CHANNEL/SALURAN (Publik, tidak punya mediaKey)
+        let downloadUrl = mediaMsg.url;
+        if (!downloadUrl && mediaMsg.directPath) {
+            downloadUrl = `https://mmg.whatsapp.net${mediaMsg.directPath}`;
+        }
+
+        if (downloadUrl) {
+            return new Promise((resolve, reject) => {
+                https.get(downloadUrl, (res) => {
+                    const data = [];
+                    res.on('data', chunk => data.push(chunk));
+                    res.on('end', () => resolve(Buffer.concat(data)));
+                }).on('error', err => reject(err));
+            });
+        }
+
+        throw new Error('Pesan ini tidak memiliki URL publik maupun Kunci Enkripsi.');
+    } catch (error) {
+        throw error;
     }
-    return buffer;
 }
 
 // ================= CORE BOT =================
@@ -234,27 +261,13 @@ async function startBot() {
 
 startBot();
 
-// ================= JADWAL OFF & ON =================
-function scheduleDailyTask(hour, minute, task) {
-    const now = new Date();
-    const target = new Date();
-    target.setHours(hour, minute, 0, 0);
-    if (target <= now) target.setDate(target.getDate() + 1);
-    setTimeout(() => {
-        task();
-        setInterval(task, 86400000); 
-    }, target - now);
-}
-scheduleDailyTask(4, 50, () => { if (sock) sock.ws.close(); });
-scheduleDailyTask(5, 0, () => { startBot(); });
+// ================= AUTO RESTART (3 JAM SEKALI) =================
+// Bot akan memberikan keterangan dan otomatis melakukan restart 
+// setiap 3 jam sekali untuk menyegarkan memori VPS dan mencegah lag.
+setTimeout(() => {
+    console.log(`[BOT ${BOT_ID}] ♻️ Melakukan Auto-Restart rutin 3 jam sekali...`);
+    process.exit(1); 
+}, 3 * 60 * 60 * 1000);
 
-// ================= WATCHDOG =================
-let lastActivityTime = Date.now();
-const MAX_IDLE_TIME = 120 * 60 * 1000; 
-function resetWatchdog() { lastActivityTime = Date.now(); }
-
-setInterval(() => {
-    if (Date.now() - lastActivityTime > MAX_IDLE_TIME) process.exit(1); 
-}, 10 * 60 * 1000);
 process.on('unhandledRejection', () => { });
 process.on('uncaughtException', () => process.exit(1));
