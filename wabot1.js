@@ -6,7 +6,7 @@ const QrCode = require('qrcode-reader');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto'); // Ditambahkan untuk sistem Hash Cepat
+const crypto = require('crypto');
 
 // ==========================================
 //             KONFIGURASI UTAMA
@@ -15,7 +15,7 @@ const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
 const ENABLE_FORWARD_TO_SECONDARY = true; 
-const DELAY_MS = 1000; 
+const DELAY_MS = 1000; // Delay pas 1 detik antara Grup 1 dan Grup 2
 
 const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
 const BOT_ID = String(process.env.BOT_ID || '1').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -23,43 +23,53 @@ const BOT_ID = String(process.env.BOT_ID || '1').replace(/[^a-zA-Z0-9_-]/g, '');
 const SESSION_PATH = `auth_info_bot${BOT_ID}`;
 let sock;
 
-// ================= SISTEM CACHE LINTAS BOT (ATOMIC LOCK) =================
-const CACHE_TTL = 10000; // Cache kedaluwarsa dalam 10 detik
-const CACHE_DIR = path.join(__dirname, 'shared_cache');
-
-// Buat folder cache jika belum ada, atau bersihkan sisa cache lama saat bot baru menyala
-if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-} else {
-    try {
-        const files = fs.readdirSync(CACHE_DIR);
-        for (const file of files) fs.unlinkSync(path.join(CACHE_DIR, file));
-    } catch (e) {}
-}
+// ================= SISTEM ANTI-DUPLIKAT LINTAS BOT 24 JAM =================
+const HISTORY_DIR = path.join(__dirname, 'history_links');
+if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true });
 
 function isDuplicate(link) {
-    // Ubah link menjadi kode hash unik agar aman dijadikan nama file
+    // Ubah link menjadi kode hash unik
     const hash = crypto.createHash('md5').update(link).digest('hex');
-    const lockFile = path.join(CACHE_DIR, `${hash}.lock`);
+    const historyFile = path.join(HISTORY_DIR, `${hash}.txt`);
+
+    // Jika file sudah ada di history, berarti duplikat (sudah pernah dieksekusi bot mana pun)
+    if (fs.existsSync(historyFile)) return true;
 
     try {
-        // Flag 'wx' adalah kunci utamanya. Sistem Operasi HANYA akan mengizinkan 
-        // file dibuat jika belum ada. Jika 5 bot mencoba ini di milidetik yang sama persis, 
-        // OS hanya akan meloloskan 1 bot, sisanya akan langsung dilempar ke error (catch).
-        const fd = fs.openSync(lockFile, 'wx');
+        // Sistem Atomic Lock: Bot berlomba membuat file. 
+        // Hanya bot tercepat yang diizinkan OS untuk membuat file ini.
+        const fd = fs.openSync(historyFile, 'wx');
+        fs.writeSync(fd, Date.now().toString());
         fs.closeSync(fd);
-
-        // Jika sampai di baris ini, berarti Bot INI yang menang dan tercepat.
-        // Jadwalkan penghapusan gembok setelah 10 detik.
-        setTimeout(() => {
-            try { if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile); } catch (e) {}
-        }, CACHE_TTL);
-
-        return false; // Bukan duplikat, izinkan forward!
+        
+        return false; // Berhasil mengunci, ini BUKAN duplikat
     } catch (err) {
-        // Jika masuk ke sini, berarti file sudah dibuat oleh bot lain beberapa mikrodetik yang lalu
-        return true; // Ini duplikat, stop forward!
+        return true; // Kalah cepat, bot lain baru saja membuat file ini (Duplikat)
     }
+}
+
+// ================= FUNGSI KIRIM (LANGSUNG DARI BOT YANG BEKERJA) =================
+function sendOnce(text, label) {
+    const key = text.trim();
+    
+    // Cegah duplikat realtime
+    if (isDuplicate(key)) return;
+
+    const msg = `${key}\n\nTipe: ${label}`;
+
+    if (sock) {
+        // 1. Eksekusi Instan ke Grup Utama (0 ms)
+        sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => { });
+
+        // 2. Eksekusi ke Grup Kedua (Dengan Delay 1 Detik)
+        if (ENABLE_FORWARD_TO_SECONDARY) {
+            setTimeout(() => {
+                sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => { });
+            }, DELAY_MS);
+        }
+    }
+
+    resetWatchdog();
 }
 
 // ================= EKSTRAKSI URL =================
@@ -77,30 +87,6 @@ function extractUrls(text) {
         results.push(u.startsWith('http') ? u : 'https://' + u);
     }
     return results;
-}
-
-// ================= FUNGSI KIRIM (NON-BLOCKING) =================
-function sendOnce(text, label) {
-    const key = text.trim();
-    
-    // Pengecekan realtime lintas bot
-    if (isDuplicate(key)) return;
-
-    const msg = `${key}\n\nTipe: ${label}`;
-
-    if (sock) {
-        // 1. Eksekusi Instan ke Grup Utama (0 ms)
-        sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => { });
-
-        // 2. Eksekusi ke Grup Kedua (Dengan Delay)
-        if (ENABLE_FORWARD_TO_SECONDARY) {
-            setTimeout(() => {
-                sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => { });
-            }, DELAY_MS);
-        }
-    }
-
-    resetWatchdog();
 }
 
 // ================= DETEKSI GAMBAR QR =================
@@ -172,25 +158,28 @@ async function startBot() {
         if (connection === 'close') {
             const reason = lastDisconnect.error?.output?.statusCode;
             if (reason !== DisconnectReason.loggedOut) {
-                console.log('🔄 Koneksi terputus, menyambung kembali...');
+                console.log(`[BOT ${BOT_ID}] 🔄 Koneksi terputus, menyambung kembali...`);
                 setTimeout(startBot, 3000);
             } else {
-                console.log(`⚠️ Sesi habis. Silakan hapus folder ${SESSION_PATH} dan login ulang.`);
+                console.log(`[BOT ${BOT_ID}] ⚠️ Sesi habis. Silakan hapus folder ${SESSION_PATH} dan login ulang.`);
                 process.exit(1);
             }
         } else if (connection === 'open') {
-            console.log(`⚡ BOT ${BOT_ID} READY! (Atomic Cache Lintas Bot Aktif)`);
+            console.log(`⚡ BOT ${BOT_ID} READY! (Mencari dan Mengeksekusi Mandiri)`);
             resetWatchdog();
         }
     });
 
-    // ================= HANDLER PESAN MASUK =================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
         const from = msg.key.remoteJid;
+        
+        // =================================================================================
+        // ANTI-LOOPING: ABAIKAN PESAN DARI GRUP UTAMA & KEDUA AGAR BOT LAIN TIDAK NYAHUT
+        // =================================================================================
         if (!from || from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID || !from.includes('@')) return;
 
         const timestamp = msg.messageTimestamp;
@@ -205,13 +194,11 @@ async function startBot() {
         if (msgObj.viewOnceMessageV2Extension) msgObj = msgObj.viewOnceMessageV2Extension.message;
         if (msgObj.documentWithCaptionMessage) msgObj = msgObj.documentWithCaptionMessage.message;
 
-        // 1. Tangani Teks
         const text = msgObj.conversation || msgObj.extendedTextMessage?.text || msgObj.imageMessage?.caption || msgObj.videoMessage?.caption || '';
         if (text) {
             extractUrls(text).forEach(url => sendOnce(url, 'Link'));
         }
 
-        // 2. Tangani Media
         const imageMsg = msgObj.imageMessage;
         const stickerMsg = msgObj.stickerMessage;
 
@@ -231,7 +218,6 @@ async function startBot() {
         }
     });
 
-    // ================= HANDLER DESKRIPSI GRUP =================
     sock.ev.on('groups.update', updates => {
         for (const update of updates) {
             if (update.desc) {
@@ -242,6 +228,24 @@ async function startBot() {
 }
 
 startBot();
+
+// ================= PEMBERSIH MEMORY LINTAS BOT =================
+// Menghapus histori link yang sudah berumur 24 jam agar tidak menumpuk di VPS
+setInterval(() => {
+    try {
+        const now = Date.now();
+        if (!fs.existsSync(HISTORY_DIR)) return;
+        const files = fs.readdirSync(HISTORY_DIR);
+        
+        for (const file of files) {
+            const filePath = path.join(HISTORY_DIR, file);
+            const stats = fs.statSync(filePath);
+            if (now - stats.mtimeMs > 86400000) { // 86400000 ms = 24 Jam
+                fs.unlinkSync(filePath);
+            }
+        }
+    } catch (e) {}
+}, 3600000); // Jalan setiap 1 Jam
 
 // ================= JADWAL OFF & ON =================
 function scheduleDailyTask(hour, minute, task) {
@@ -266,7 +270,7 @@ scheduleDailyTask(5, 0, () => {
     startBot(); 
 });
 
-// ================= WATCHDOG (AUTO-RESTART) =================
+// ================= WATCHDOG =================
 let lastActivityTime = Date.now();
 const MAX_IDLE_TIME = 120 * 60 * 1000; 
 
@@ -276,7 +280,7 @@ function resetWatchdog() {
 
 setInterval(() => {
     if (Date.now() - lastActivityTime > MAX_IDLE_TIME) {
-        console.log(`[BOT ${BOT_ID}] ⚠️ Tidak ada aktivitas pesan/forward selama 120 menit. Auto-restart...`);
+        console.log(`[BOT ${BOT_ID}] ⚠️ Tidak ada aktivitas selama 120 menit. Auto-restart...`);
         process.exit(1); 
     }
 }, 10 * 60 * 1000);
