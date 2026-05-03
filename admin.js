@@ -38,7 +38,6 @@ async function startAdminBot() {
     adminSock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // Menampilkan QR Admin di Terminal VPS
         if (qr) {
             console.log('\n==================================================');
             console.log('SCAN QR DI BAWAH INI UNTUK LOGIN SEBAGAI ADMIN BOT');
@@ -70,19 +69,13 @@ async function startAdminBot() {
         
         if (!text) return;
 
-        // --- FITUR BARU: CEK ID GRUP (Hanya merespon di dalam grup) ---
         if (from.endsWith('@g.us')) {
             if (text === '!idgrup') {
                 await adminSock.sendMessage(from, { text: `*ID Grup Ini:*\n${from}` }, { quoted: msg });
             }
-            return; // Abaikan pesan grup lainnya agar admin tidak nyepam
+            return; 
         }
 
-        // ==============================================================
-        // MULAI DARI SINI HANYA MERESPON PESAN JAPRI (PERSONAL MESSAGE)
-        // ==============================================================
-
-        // --- FITUR BARU: LIST SEMUA GRUP ---
         if (text === '!listgrup') {
             try {
                 const groups = await adminSock.groupFetchAllParticipating();
@@ -105,19 +98,17 @@ async function startAdminBot() {
             return;
         }
 
-        // --- FITUR: BATALKAN SETUP ---
         if (text === '!batal') {
             if (activeSetups.has(from)) {
                 const setupData = activeSetups.get(from);
                 await clearTrackingMessages(from);
-                try { setupData.client.ws.close(); } catch (e) {} // Tutup websocket tanpa logout
+                try { setupData.client.ws.close(); } catch (e) {} 
                 activeSetups.delete(from);
                 await adminSock.sendMessage(from, { text: '❌ Proses penambahan user dibatalkan.' });
             }
             return;
         }
 
-        // --- FITUR UTAMA: TAMBAH USER / KLIEN BARU ---
         if (text.startsWith('!tambahuser')) {
             if (activeSetups.has(from)) {
                 await adminSock.sendMessage(from, { text: '⚠️ Selesaikan atau ketik *!batal* pada proses sebelumnya terlebih dahulu.' });
@@ -132,11 +123,18 @@ async function startAdminBot() {
                 return;
             }
 
-            // Kirim pesan loading dan simpan kuncinya untuk dihapus nanti
+            const folderName = `auth_info_bot${newBotId}`;
+
+            // ========================================================
+            // PERBAIKAN BUG: Hapus folder lama jika sisa gagal login
+            // ========================================================
+            if (fs.existsSync(folderName)) {
+                console.log(`Menghapus sesi lama yang korup: ${folderName}`);
+                fs.rmSync(folderName, { recursive: true, force: true });
+            }
+
             const loadingMsg = await adminSock.sendMessage(from, { text: `⏳ Memproses sesi untuk *bot${newBotId}*...\nTunggu QR Code muncul.` });
 
-            // Inisiasi sesi untuk klien baru
-            const folderName = `auth_info_bot${newBotId}`;
             const { state: clientState, saveCreds: clientSaveCreds } = await useMultiFileAuthState(folderName);
 
             const setupSock = makeWASocket({
@@ -156,25 +154,21 @@ async function startAdminBot() {
             });
 
             setupSock.ev.on('connection.update', async (update) => {
-                const { connection, qr } = update;
+                const { connection, qr, lastDisconnect } = update;
                 const setupData = activeSetups.get(from);
                 if (!setupData) return;
 
-                // Jika Baileys menghasilkan QR baru
                 if (qr) {
                     try {
-                        // Hapus QR lama jika ada (mencegah nyepam chat)
                         if (setupData.lastQrKey) {
                             try { await adminSock.sendMessage(from, { delete: setupData.lastQrKey }); } catch(e) {}
                         }
 
-                        // Ubah teks QR menjadi Gambar (Buffer)
                         const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
                         
-                        // Kirim gambar QR ke Admin
                         const qrMsg = await adminSock.sendMessage(from, { 
                             image: qrBuffer, 
-                            caption: `*QR LOGIN: bot${newBotId}*\n\nSilakan kirim gambar ini ke pelanggan, atau langsung scan menggunakan HP pelanggan.\n\n_(Ketik *!batal* jika ingin membatalkan)_` 
+                            caption: `*QR LOGIN: bot${newBotId}*\n\nSilakan scan menggunakan HP pelanggan.\n\n_(Ketik *!batal* jika ingin membatalkan)_` 
                         });
                         
                         setupData.lastQrKey = qrMsg.key;
@@ -184,17 +178,29 @@ async function startAdminBot() {
                     }
                 }
 
-                // JIKA KLIEN BERHASIL SCAN QR
+                // ========================================================
+                // PERBAIKAN BUG: Jika Timeout / Gagal di tengah jalan
+                // ========================================================
+                if (connection === 'close') {
+                    await clearTrackingMessages(from);
+                    await adminSock.sendMessage(from, { text: `❌ Setup untuk *bot${newBotId}* gagal atau timeout.\nSilakan ulangi perintah *!tambahuser ${newBotId}*.` });
+                    activeSetups.delete(from);
+                    
+                    // Bersihkan folder agar siap diulang
+                    if (fs.existsSync(folderName)) {
+                        fs.rmSync(folderName, { recursive: true, force: true });
+                    }
+                }
+
                 if (connection === 'open') {
                     await clearTrackingMessages(from);
                     
-                    const successMsg = `*✅ SUKSES LOGIN!*\nSesi untuk *bot${newBotId}* telah tersimpan aman di server.\n\nSekarang Anda bisa menjalankan bot pelanggan tersebut di terminal VPS dengan perintah:\n\n*BOT_ID=${newBotId} pm2 start index.js --name "wabot-${newBotId}"*`;
+                    const successMsg = `*✅ SUKSES LOGIN!*\nSesi untuk *bot${newBotId}* telah tersimpan aman di server.\n\nSekarang jalankan bot pelanggan di terminal VPS:\n\n*BOT_ID=${newBotId} pm2 start wabot.js --name "wabot-${newBotId}"*`;
                     
                     await adminSock.sendMessage(from, { text: successMsg });
                     
                     activeSetups.delete(from);
                     
-                    // Tutup koneksi setup secara halus (TANPA LOGOUT) agar sesi aman
                     setTimeout(() => {
                         try { setupSock.ws.close(); } catch(e) {}
                     }, 2000);
@@ -204,5 +210,4 @@ async function startAdminBot() {
     });
 }
 
-// Mulai jalankan Admin Bot
 startAdminBot();
