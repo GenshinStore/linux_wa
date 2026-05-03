@@ -8,17 +8,17 @@ const fs = require('fs');
 const path = require('path');
 
 // ================= KONFIGURASI =================
-const TARGET_GROUP_ID = '120363426296094605@g.us';
+const TARGET_GROUP_ID = '120363426296094605@g.us'; // Pastikan ini ID Grup tujuan Forward
 const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
 
 const BOT_ID = String(process.env.BOT_ID || '1').replace(/[^a-zA-Z0-9_-]/g, '');
 const SESSION_PATH = `auth_info_bot${BOT_ID}`;
 
-let sock; // Variabel global untuk instance bot
+let sock;
 
 // ================= SISTEM CACHE REAL-TIME =================
 const activeLinks = new Set();
-const CACHE_TTL = 10000; // 10 detik
+const CACHE_TTL = 10000; 
 
 function isDuplicate(link) {
     if (activeLinks.has(link)) return true;
@@ -51,7 +51,6 @@ function sendOnce(text, label) {
     const msg = `${key}\n\nTipe: ${label}`;
     
     if (sock) {
-        // Eksekusi instan tanpa memblokir
         sock.sendMessage(TARGET_GROUP_ID, { text: msg }).catch(() => {});
     }
     resetWatchdog();
@@ -91,12 +90,13 @@ async function detectQR(buffer) {
             .extract({ left: Math.floor((meta.width - cw2) / 2), top: Math.floor((meta.height - ch2) / 2), width: cw2, height: ch2 })
             .resize(cw2 * 3).greyscale().linear(2, -100).png().toBuffer());
         return res;
-    } catch {
+    } catch (e) {
+        console.error('\n[ERROR DETECT QR]', e);
         return null;
     }
 }
 
-// Helper untuk mengunduh media Baileys
+// ================= DOWNLOAD MEDIA BAILEYS =================
 async function downloadMedia(message, type) {
     const stream = await downloadContentFromMessage(message, type);
     let buffer = Buffer.from([]);
@@ -106,7 +106,7 @@ async function downloadMedia(message, type) {
     return buffer;
 }
 
-// ================= CORE BOT BAILEYS =================
+// ================= CORE BOT =================
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
     const { version } = await fetchLatestBaileysVersion();
@@ -115,8 +115,8 @@ async function startBot() {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: ['TermuxClaimer', 'Chrome', '1.0.0'],
-        getMessage: async () => ({ conversation: '' }) // Meringankan RAM
+        browser: [`WaBot-${BOT_ID}`, 'Chrome', '1.0.0'],
+        getMessage: async () => ({ conversation: '' })
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -132,11 +132,11 @@ async function startBot() {
                 console.log('🔄 Koneksi terputus, menyambung kembali...');
                 setTimeout(startBot, 3000);
             } else {
-                console.log(`⚠️ Sesi habis. Silakan hapus folder ${SESSION_PATH} dan scan ulang.`);
+                console.log(`⚠️ Sesi habis. Hapus folder ${SESSION_PATH} dan ulangi pendaftaran.`);
                 process.exit(1);
             }
         } else if (connection === 'open') {
-            console.log(`⚡ BOT ${BOT_ID} READY! (Menggunakan Baileys - Ultra Fast)`);
+            console.log(`⚡ BOT ${BOT_ID} READY!`);
             resetWatchdog();
         }
     });
@@ -149,39 +149,58 @@ async function startBot() {
         const from = msg.key.remoteJid;
         if (!from || from === TARGET_GROUP_ID || !from.includes('@')) return;
 
-        // Abaikan pesan yang lebih dari 60 detik (Mencegah spam saat bot restart)
         const timestamp = msg.messageTimestamp;
         if (timestamp < Math.floor(Date.now() / 1000) - 60) return;
 
         resetWatchdog();
 
+        // ==========================================================
+        // PERBAIKAN: BUKA BUNGKUSAN PESAN SEMENTARA (EPHEMERAL)
+        // ==========================================================
+        let msgObj = msg.message;
+        
+        // Membuka lapis demi lapis jika dibungkus oleh fitur WA
+        if (msgObj.ephemeralMessage) msgObj = msgObj.ephemeralMessage.message;
+        if (msgObj.viewOnceMessage) msgObj = msgObj.viewOnceMessage.message;
+        if (msgObj.viewOnceMessageV2) msgObj = msgObj.viewOnceMessageV2.message;
+        if (msgObj.viewOnceMessageV2Extension) msgObj = msgObj.viewOnceMessageV2Extension.message;
+        if (msgObj.documentWithCaptionMessage) msgObj = msgObj.documentWithCaptionMessage.message;
+
         // 1. Ekstrak Teks
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || '';
+        const text = msgObj.conversation || msgObj.extendedTextMessage?.text || msgObj.imageMessage?.caption || msgObj.videoMessage?.caption || '';
         if (text) {
             extractUrls(text).forEach(url => sendOnce(url, 'Link'));
         }
 
-        // 2. Ekstrak Media Asinkron (Tidak memblokir pesan selanjutnya)
-        const imageMsg = msg.message.imageMessage;
-        const stickerMsg = msg.message.stickerMessage;
+        // 2. Ekstrak Media
+        const imageMsg = msgObj.imageMessage;
+        const stickerMsg = msgObj.stickerMessage;
 
         if (imageMsg || stickerMsg) {
             const mediaMsg = imageMsg || stickerMsg;
             const mediaType = imageMsg ? 'image' : 'sticker';
 
-            // Jangan gunakan await di luar agar tidak antre
+            console.log(`\n[MEDIA] Mendeteksi ${mediaType} baru...`);
+
             downloadMedia(mediaMsg, mediaType).then(buffer => {
+                console.log(`[MEDIA] Download sukses. Memindai QR...`);
                 detectQR(buffer).then(qrData => {
-                    if (qrData && VALID_DOMAINS.test(qrData)) {
-                        const label = imageMsg ? 'Gambar QR' : 'Stiker QR';
-                        sendOnce(qrData, label);
+                    if (qrData) {
+                        console.log(`[MEDIA] ✅ QR Terbaca: ${qrData}`);
+                        if (VALID_DOMAINS.test(qrData)) {
+                            const label = imageMsg ? 'Gambar QR' : 'Stiker QR';
+                            sendOnce(qrData, label);
+                        } else {
+                            console.log(`[MEDIA] ❌ QR Diabaikan (Bukan Link Dana/Gopay/Shopee).`);
+                        }
+                    } else {
+                        console.log(`[MEDIA] ❌ Tidak ditemukan QR Code pada ${mediaType} tersebut.`);
                     }
-                }).catch(() => {});
-            }).catch(() => {});
+                }).catch(err => console.error('[MEDIA] ERROR saat memindai:', err));
+            }).catch(err => console.error('[MEDIA] ERROR gagal download media:', err));
         }
     });
 
-    // Event Group Update (Deskripsi berubah)
     sock.ev.on('groups.update', updates => {
         for (const update of updates) {
             if (update.desc) {
@@ -191,7 +210,6 @@ async function startBot() {
     });
 }
 
-// Memulai Bot Pertama Kali
 startBot();
 
 // ================= JADWAL OFF & ON =================
@@ -207,13 +225,11 @@ function scheduleDailyTask(hour, minute, task) {
     }, target - now);
 }
 
-// OFF JAM 04:50 (Memutuskan koneksi WebSocket)
 scheduleDailyTask(4, 50, () => {
-    console.log(`[BOT ${BOT_ID}] OFF (Menutup koneksi WebSocket)`);
+    console.log(`[BOT ${BOT_ID}] OFF`);
     if (sock) sock.ws.close();
 });
 
-// ON JAM 05:00 (Menyambungkan kembali)
 scheduleDailyTask(5, 0, () => {
     console.log(`[BOT ${BOT_ID}] ON kembali`);
     startBot();
@@ -221,7 +237,7 @@ scheduleDailyTask(5, 0, () => {
 
 // ================= WATCHDOG (AUTO-RESTART) =================
 let lastActivityTime = Date.now();
-const MAX_IDLE_TIME = 120 * 60 * 1000; // 120 menit
+const MAX_IDLE_TIME = 120 * 60 * 1000;
 
 function resetWatchdog() {
     lastActivityTime = Date.now();
