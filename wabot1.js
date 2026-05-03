@@ -7,7 +7,7 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const https = require('https'); // Modul untuk download dari Channel
+const https = require('https');
 
 // ==========================================
 //             KONFIGURASI UTAMA
@@ -76,7 +76,7 @@ function sendOnce(text, label) {
     }
 }
 
-// ================= EKSTRAKSI URL =================
+// ================= EKSTRAKSI URL SUPER KETAT =================
 function extractUrls(text) {
     if (!text) return [];
     const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
@@ -86,62 +86,64 @@ function extractUrls(text) {
     const results = [];
     for (let i = 0; i < matches.length; i++) {
         let u = matches[i];
-        if (u.includes('link.dana.id/minta') || u.endsWith('link.dana.id') || u.endsWith('link.dana.id/')) continue;
+        
+        // Buang URL minta dana atau domain kosong
+        if (u.includes('/minta') || u.endsWith('dana.id') || u.endsWith('dana.id/')) continue;
+        
+        // Jika ini link DANA, pastikan secara spesifik ada unsur 'kaget' atau 'danakaget'
+        if (u.includes('dana.id') && !u.includes('kaget') && !u.includes('danakaget')) {
+            continue;
+        }
+
         results.push(u.startsWith('http') ? u : 'https://' + u);
     }
     return results;
 }
 
-// ================= DETEKSI GAMBAR QR =================
+// ================= DETEKSI QR PARALEL (SUPER CEPAT) =================
 async function detectQR(buffer) {
     try {
-        const decode = async (imgBuffer) => {
-            const image = await Jimp.read(imgBuffer);
-            return new Promise((resolve) => {
+        const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
+        const meta = await baseImg.metadata();
+
+        const decodeBuffer = async (imgBuf) => {
+            const image = await Jimp.read(imgBuf);
+            return new Promise((resolve, reject) => {
                 const qr = new QrCode();
-                qr.callback = (e, v) => resolve((e || !v) ? null : v.result);
+                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve(v.result);
                 qr.decode(image.bitmap);
             });
         };
 
-        const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
-        const meta = await baseImg.metadata();
+        const cw1 = Math.floor(meta.width * 0.7); const ch1 = Math.floor(meta.height * 0.6);
+        const cw2 = Math.floor(meta.width * 0.45); const ch2 = Math.floor(meta.height * 0.4);
 
-        let res = await decode(await baseImg.clone().png().toBuffer());
-        if (res) return res;
+        // Siapkan 4 variasi filter gambar sekaligus di memori
+        const buffers = await Promise.all([
+            baseImg.clone().png().toBuffer(),
+            baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer(),
+            baseImg.clone().extract({ left: Math.floor((meta.width - cw1) / 2), top: Math.floor((meta.height - ch1) / 2), width: cw1, height: ch1 }).resize(cw1 * 2).greyscale().threshold(140).png().toBuffer(),
+            baseImg.clone().extract({ left: Math.floor((meta.width - cw2) / 2), top: Math.floor((meta.height - ch2) / 2), width: cw2, height: ch2 }).resize(cw2 * 3).greyscale().linear(2, -100).png().toBuffer()
+        ]);
 
-        res = await decode(await baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer());
-        if (res) return res;
-
-        const cw1 = Math.floor(meta.width * 0.7);
-        const ch1 = Math.floor(meta.height * 0.6);
-        res = await decode(await baseImg.clone().extract({ left: Math.floor((meta.width - cw1) / 2), top: Math.floor((meta.height - ch1) / 2), width: cw1, height: ch1 }).resize(cw1 * 2).greyscale().threshold(140).png().toBuffer());
-        if (res) return res;
-
-        const cw2 = Math.floor(meta.width * 0.45);
-        const ch2 = Math.floor(meta.height * 0.4);
-        return await decode(await baseImg.clone().extract({ left: Math.floor((meta.width - cw2) / 2), top: Math.floor((meta.height - ch2) / 2), width: cw2, height: ch2 }).resize(cw2 * 3).greyscale().linear(2, -100).png().toBuffer());
+        // Balapan proses! Siapa yang terbaca QR duluan akan langsung dikirim hasilnya (0 delay)
+        return await Promise.any(buffers.map(buf => decodeBuffer(buf)));
     } catch {
-        return null;
+        return null; // Promise.any akan error jika ke-4 cara gagal semua (Bukan QR Valid)
     }
 }
 
-// ================= DOWNLOAD MEDIA (Support Channel) =================
+// ================= DOWNLOAD MEDIA =================
 async function downloadMedia(mediaMsg, type) {
     try {
         if (mediaMsg.mediaKey) {
             const stream = await downloadContentFromMessage(mediaMsg, type);
             let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-                buffer = Buffer.concat([buffer, chunk]);
-            }
+            for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
             return buffer;
         } 
         
-        let downloadUrl = mediaMsg.url;
-        if (!downloadUrl && mediaMsg.directPath) {
-            downloadUrl = `https://mmg.whatsapp.net${mediaMsg.directPath}`;
-        }
+        let downloadUrl = mediaMsg.url || (mediaMsg.directPath ? `https://mmg.whatsapp.net${mediaMsg.directPath}` : null);
 
         if (downloadUrl) {
             return new Promise((resolve, reject) => {
@@ -153,9 +155,7 @@ async function downloadMedia(mediaMsg, type) {
             });
         }
         throw new Error('Tidak ada url atau mediaKey');
-    } catch (error) {
-        throw error;
-    }
+    } catch (error) { throw error; }
 }
 
 // ================= CORE BOT =================
@@ -183,11 +183,9 @@ async function startBot() {
             const reason = lastDisconnect.error?.output?.statusCode;
             if (reason !== DisconnectReason.loggedOut) {
                 setTimeout(startBot, 3000);
-            } else {
-                process.exit(1);
-            }
+            } else { process.exit(1); }
         } else if (connection === 'open') {
-            console.log(`⚡ BOT ${BOT_ID} READY! (Mendukung Channel WA)`);
+            console.log(`⚡ BOT ${BOT_ID} READY! (Fast Paralel Scan)`);
         }
     });
 
@@ -215,18 +213,14 @@ async function startBot() {
         if (imageMsg || stickerMsg) {
             const mediaMsg = imageMsg || stickerMsg;
             const mediaType = imageMsg ? 'image' : 'sticker';
-            const sourceInfo = from.includes('@newsletter') ? 'Channel' : 'Grup/PM';
 
-            console.log(`[BOT ${BOT_ID}] 🔍 Mendeteksi ${mediaType} dari ${sourceInfo}...`);
-
+            // Proses download dan deteksi secara asynchronous murni
             downloadMedia(mediaMsg, mediaType).then(buffer => {
                 detectQR(buffer).then(qrData => {
-                    if (qrData) {
-                        if (VALID_DOMAINS.test(qrData)) {
-                            if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) return;
-                            console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
-                            sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
-                        }
+                    if (qrData && VALID_DOMAINS.test(qrData)) {
+                        // Tambahan penyaringan untuk menghindari link profil
+                        if (qrData.includes('qr.dana.id') || qrData.includes('/minta')) return;
+                        sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
                     }
                 }).catch(() => {});
             }).catch(() => {});
@@ -242,12 +236,30 @@ async function startBot() {
 
 startBot();
 
-// ================= AUTO RESTART (3 JAM SEKALI) =================
-// Keterangan bot akan ditampilkan dan direstart otomatis
-setInterval(() => {
-    console.log(`[BOT ${BOT_ID}] ♻️ Melakukan Auto-Restart rutin 3 jam sekali...`);
-    process.exit(1); 
-}, 3 * 60 * 60 * 1000);
+// ================= JADWAL OFF & ON HARIAN =================
+function scheduleDailyTask(hour, minute, task) {
+    const now = new Date();
+    const target = new Date();
+    target.setHours(hour, minute, 0, 0);
+    if (target <= now) target.setDate(target.getDate() + 1);
+
+    setTimeout(() => {
+        task();
+        setInterval(task, 24 * 60 * 60 * 1000);
+    }, target - now);
+}
+
+// Sesi OFF setiap jam 04:50
+scheduleDailyTask(4, 50, () => {
+    console.log(`[BOT ${BOT_ID}] 📴 Mode OFF Otomatis`);
+    if (sock) sock.ws.close(); 
+});
+
+// Sesi ON kembali setiap jam 06:00
+scheduleDailyTask(6, 0, () => {
+    console.log(`[BOT ${BOT_ID}] 🔛 Menyambung Kembali Sesi`);
+    startBot(); 
+});
 
 process.on('unhandledRejection', () => { });
 process.on('uncaughtException', () => process.exit(1));
