@@ -192,6 +192,7 @@ async function startBot() {
         const text = msgObj.conversation || msgObj.extendedTextMessage?.text || msgObj.imageMessage?.caption || msgObj.videoMessage?.caption || '';
         if (text) extractUrls(text).forEach(url => sendOnce(url, 'Link'));
 
+        // 2. Ekstrak Media
         const imageMsg = msgObj.imageMessage;
         const stickerMsg = msgObj.stickerMessage;
 
@@ -204,13 +205,23 @@ async function startBot() {
 
             downloadMedia(mediaMsg, mediaType).then(buffer => {
                 detectQR(buffer).then(qrData => {
-                    if (qrData && VALID_DOMAINS.test(qrData)) {
-                        if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) return;
-                        console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
-                        sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
+                    if (qrData) {
+                        console.log(`[BOT ${BOT_ID}] 🔤 Hasil Scan: ${qrData}`);
+                        if (VALID_DOMAINS.test(qrData)) {
+                            if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) {
+                                console.log(`[BOT ${BOT_ID}] ⚠️ Diabaikan: Ini kode QR profil / minta dana.`);
+                                return;
+                            }
+                            console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
+                            sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
+                        } else {
+                            console.log(`[BOT ${BOT_ID}] ❌ Diabaikan: Link bukan DANA/GoPay/Shopee.`);
+                        }
+                    } else {
+                        console.log(`[BOT ${BOT_ID}] ❌ Gagal: Tidak ada QR yang terbaca di media ini.`);
                     }
-                }).catch(() => {});
-            }).catch(() => {});
+                }).catch(err => console.log(`[BOT ${BOT_ID}] ⚠️ Error Scan QR:`, err.message));
+            }).catch(err => console.log(`[BOT ${BOT_ID}] ⚠️ Error Download Media:`, err.message));
         }
     });
 
