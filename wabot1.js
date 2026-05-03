@@ -7,6 +7,7 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const https = require('https'); // Modul untuk download dari Channel
 
 // ==========================================
 //             KONFIGURASI UTAMA
@@ -17,7 +18,7 @@ const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 const ENABLE_FORWARD_TO_SECONDARY = true; 
 const DELAY_MS = 1000; 
 
-const CACHE_TTL_MINUTES = 1; 
+const CACHE_TTL_MINUTES = 5; 
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
@@ -26,7 +27,7 @@ const BOT_ID = String(process.env.BOT_ID || '1').replace(/[^a-zA-Z0-9_-]/g, '');
 const SESSION_PATH = `auth_info_bot${BOT_ID}`;
 let sock;
 
-// ================= SISTEM ANTI-DUPLIKAT LINTAS BOT =================
+// ================= SISTEM ANTI-DUPLIKAT =================
 const HISTORY_DIR = path.join(__dirname, 'history_links');
 
 if (!fs.existsSync(HISTORY_DIR)) {
@@ -73,7 +74,6 @@ function sendOnce(text, label) {
             }, DELAY_MS);
         }
     }
-    resetWatchdog();
 }
 
 // ================= EKSTRAKSI URL =================
@@ -126,12 +126,9 @@ async function detectQR(buffer) {
     }
 }
 
-// ================= DOWNLOAD MEDIA =================
-const https = require('https'); // Modul bawaan Node.js untuk download jalur publik
-
+// ================= DOWNLOAD MEDIA (Support Channel) =================
 async function downloadMedia(mediaMsg, type) {
     try {
-        // 1. Jika dari Grup/PM (Dienkripsi E2E, punya mediaKey)
         if (mediaMsg.mediaKey) {
             const stream = await downloadContentFromMessage(mediaMsg, type);
             let buffer = Buffer.from([]);
@@ -141,7 +138,6 @@ async function downloadMedia(mediaMsg, type) {
             return buffer;
         } 
         
-        // 2. Jika dari CHANNEL/SALURAN (Publik, tidak punya mediaKey)
         let downloadUrl = mediaMsg.url;
         if (!downloadUrl && mediaMsg.directPath) {
             downloadUrl = `https://mmg.whatsapp.net${mediaMsg.directPath}`;
@@ -156,8 +152,7 @@ async function downloadMedia(mediaMsg, type) {
                 }).on('error', err => reject(err));
             });
         }
-
-        throw new Error('Pesan ini tidak memiliki URL publik maupun Kunci Enkripsi.');
+        throw new Error('Tidak ada url atau mediaKey');
     } catch (error) {
         throw error;
     }
@@ -193,7 +188,6 @@ async function startBot() {
             }
         } else if (connection === 'open') {
             console.log(`⚡ BOT ${BOT_ID} READY! (Mendukung Channel WA)`);
-            resetWatchdog();
         }
     });
 
@@ -203,11 +197,7 @@ async function startBot() {
         if (!msg.message || msg.key.fromMe) return;
 
         const from = msg.key.remoteJid;
-        
-        // Cek ID pengirim (Abaikan jika dari grup tujuan)
         if (!from || from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID) return;
-
-        resetWatchdog();
 
         let msgObj = msg.message;
         if (msgObj.ephemeralMessage) msgObj = msgObj.ephemeralMessage.message;
@@ -219,7 +209,6 @@ async function startBot() {
         const text = msgObj.conversation || msgObj.extendedTextMessage?.text || msgObj.imageMessage?.caption || msgObj.videoMessage?.caption || '';
         if (text) extractUrls(text).forEach(url => sendOnce(url, 'Link'));
 
-        // 2. Ekstrak Media
         const imageMsg = msgObj.imageMessage;
         const stickerMsg = msgObj.stickerMessage;
 
@@ -233,22 +222,14 @@ async function startBot() {
             downloadMedia(mediaMsg, mediaType).then(buffer => {
                 detectQR(buffer).then(qrData => {
                     if (qrData) {
-                        console.log(`[BOT ${BOT_ID}] 🔤 Hasil Scan: ${qrData}`);
                         if (VALID_DOMAINS.test(qrData)) {
-                            if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) {
-                                console.log(`[BOT ${BOT_ID}] ⚠️ Diabaikan: Ini kode QR profil / minta dana.`);
-                                return;
-                            }
+                            if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) return;
                             console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
                             sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
-                        } else {
-                            console.log(`[BOT ${BOT_ID}] ❌ Diabaikan: Link bukan DANA/GoPay/Shopee.`);
                         }
-                    } else {
-                        console.log(`[BOT ${BOT_ID}] ❌ Gagal: Tidak ada QR yang terbaca di media ini.`);
                     }
-                }).catch(err => console.log(`[BOT ${BOT_ID}] ⚠️ Error Scan QR:`, err.message));
-            }).catch(err => console.log(`[BOT ${BOT_ID}] ⚠️ Error Download Media:`, err.message));
+                }).catch(() => {});
+            }).catch(() => {});
         }
     });
 
@@ -262,9 +243,8 @@ async function startBot() {
 startBot();
 
 // ================= AUTO RESTART (3 JAM SEKALI) =================
-// Bot akan memberikan keterangan dan otomatis melakukan restart 
-// setiap 3 jam sekali untuk menyegarkan memori VPS dan mencegah lag.
-setTimeout(() => {
+// Keterangan bot akan ditampilkan dan direstart otomatis
+setInterval(() => {
     console.log(`[BOT ${BOT_ID}] ♻️ Melakukan Auto-Restart rutin 3 jam sekali...`);
     process.exit(1); 
 }, 3 * 60 * 60 * 1000);

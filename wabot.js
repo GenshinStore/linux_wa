@@ -7,11 +7,12 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const https = require('https'); // Modul untuk download dari Channel
 
 // ================= KONFIGURASI =================
 const TARGET_GROUP_ID = '120363426296094605@g.us'; 
 
-const CACHE_TTL_MINUTES = 1; 
+const CACHE_TTL_MINUTES = 5; 
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
@@ -20,7 +21,7 @@ const BOT_ID = String(process.env.BOT_ID || '1').replace(/[^a-zA-Z0-9_-]/g, '');
 const SESSION_PATH = `auth_info_bot${BOT_ID}`;
 let sock;
 
-// ================= SISTEM ANTI-DUPLIKAT LINTAS BOT =================
+// ================= SISTEM ANTI-DUPLIKAT =================
 const HISTORY_DIR = path.join(__dirname, 'history_links');
 
 if (!fs.existsSync(HISTORY_DIR)) {
@@ -78,7 +79,6 @@ function sendOnce(text, label) {
     if (sock) {
         sock.sendMessage(TARGET_GROUP_ID, { text: msg }).catch(() => { });
     }
-    resetWatchdog();
 }
 
 // ================= DETEKSI QR =================
@@ -115,14 +115,36 @@ async function detectQR(buffer) {
     }
 }
 
-// ================= DOWNLOAD MEDIA =================
-async function downloadMedia(message, type) {
-    const stream = await downloadContentFromMessage(message, type);
-    let buffer = Buffer.from([]);
-    for await (const chunk of stream) {
-        buffer = Buffer.concat([buffer, chunk]);
+// ================= DOWNLOAD MEDIA (Support Channel) =================
+async function downloadMedia(mediaMsg, type) {
+    try {
+        if (mediaMsg.mediaKey) {
+            const stream = await downloadContentFromMessage(mediaMsg, type);
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+            }
+            return buffer;
+        } 
+        
+        let downloadUrl = mediaMsg.url;
+        if (!downloadUrl && mediaMsg.directPath) {
+            downloadUrl = `https://mmg.whatsapp.net${mediaMsg.directPath}`;
+        }
+
+        if (downloadUrl) {
+            return new Promise((resolve, reject) => {
+                https.get(downloadUrl, (res) => {
+                    const data = [];
+                    res.on('data', chunk => data.push(chunk));
+                    res.on('end', () => resolve(Buffer.concat(data)));
+                }).on('error', err => reject(err));
+            });
+        }
+        throw new Error('Tidak ada url atau mediaKey');
+    } catch (error) {
+        throw error;
     }
-    return buffer;
 }
 
 // ================= CORE BOT =================
@@ -155,7 +177,6 @@ async function startBot() {
             }
         } else if (connection === 'open') {
             console.log(`⚡ BOT ${BOT_ID} READY! (Mendukung Channel WA)`);
-            resetWatchdog();
         }
     });
 
@@ -166,8 +187,6 @@ async function startBot() {
 
         const from = msg.key.remoteJid;
         if (!from || from === TARGET_GROUP_ID) return;
-
-        resetWatchdog();
 
         let msgObj = msg.message;
         if (msgObj.ephemeralMessage) msgObj = msgObj.ephemeralMessage.message;
@@ -191,10 +210,12 @@ async function startBot() {
 
             downloadMedia(mediaMsg, mediaType).then(buffer => {
                 detectQR(buffer).then(qrData => {
-                    if (qrData && VALID_DOMAINS.test(qrData)) {
-                        if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) return;
-                        console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
-                        sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
+                    if (qrData) {
+                        if (VALID_DOMAINS.test(qrData)) {
+                            if (qrData.includes('qr.dana.id') || qrData.includes('link.dana.id/minta')) return;
+                            console.log(`[BOT ${BOT_ID}] ✅ QR Valid Dieksekusi dari ${sourceInfo}`);
+                            sendOnce(qrData, imageMsg ? 'Gambar QR' : 'Stiker QR');
+                        }
                     }
                 }).catch(() => { });
             }).catch(() => { });
@@ -210,27 +231,12 @@ async function startBot() {
 
 startBot();
 
-// ================= JADWAL OFF & ON =================
-function scheduleDailyTask(hour, minute, task) {
-    const now = new Date();
-    const target = new Date();
-    target.setHours(hour, minute, 0, 0);
-    if (target <= now) target.setDate(target.getDate() + 1);
-    setTimeout(() => {
-        task();
-        setInterval(task, 24 * 60 * 60 * 1000);
-    }, target - now);
-}
-scheduleDailyTask(4, 50, () => { if (sock) sock.ws.close(); });
-scheduleDailyTask(5, 0, () => { startBot(); });
-
-// ================= WATCHDOG =================
-let lastActivityTime = Date.now();
-const MAX_IDLE_TIME = 120 * 60 * 1000;
-function resetWatchdog() { lastActivityTime = Date.now(); }
-
+// ================= AUTO RESTART (3 JAM SEKALI) =================
+// Keterangan bot akan ditampilkan dan direstart otomatis
 setInterval(() => {
-    if (Date.now() - lastActivityTime > MAX_IDLE_TIME) process.exit(1);
-}, 10 * 60 * 1000);
+    console.log(`[BOT ${BOT_ID}] ♻️ Melakukan Auto-Restart rutin 3 jam sekali...`);
+    process.exit(1); 
+}, 3 * 60 * 60 * 1000);
+
 process.on('unhandledRejection', () => { });
 process.on('uncaughtException', () => process.exit(1));
