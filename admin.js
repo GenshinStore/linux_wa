@@ -21,7 +21,6 @@ async function clearTrackingMessages(chatId) {
 }
 
 async function startAdminBot() {
-    // Folder sesi untuk bot Admin
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_admin');
     const { version } = await fetchLatestBaileysVersion();
 
@@ -125,87 +124,109 @@ async function startAdminBot() {
 
             const folderName = `auth_info_bot${newBotId}`;
 
-            // ========================================================
-            // PERBAIKAN BUG: Hapus folder lama jika sisa gagal login
-            // ========================================================
+            // Hapus folder lama jika sisa gagal login sebelumnya
             if (fs.existsSync(folderName)) {
-                console.log(`Menghapus sesi lama yang korup: ${folderName}`);
                 fs.rmSync(folderName, { recursive: true, force: true });
             }
 
             const loadingMsg = await adminSock.sendMessage(from, { text: `⏳ Memproses sesi untuk *bot${newBotId}*...\nTunggu QR Code muncul.` });
 
-            const { state: clientState, saveCreds: clientSaveCreds } = await useMultiFileAuthState(folderName);
-
-            const setupSock = makeWASocket({
-                version,
-                auth: clientState,
-                logger: pino({ level: 'silent' }),
-                browser: [`Setup Bot ${newBotId}`, 'Chrome', '1.0.0'],
-                getMessage: async () => ({ conversation: '' })
-            });
-
-            setupSock.ev.on('creds.update', clientSaveCreds);
-
+            // Simpan state awal untuk setup
             activeSetups.set(from, {
-                client: setupSock,
+                client: null,
                 messagesToDelete: [loadingMsg.key],
-                lastQrKey: null
+                lastQrKey: null,
+                qrCount: 0 // Menghitung berapa kali QR direfresh
             });
 
-            setupSock.ev.on('connection.update', async (update) => {
-                const { connection, qr, lastDisconnect } = update;
+            // Fungsi Auto-Reconnect jika putus di tengah scan
+            async function connectSetupSocket(retryCount = 0) {
+                // Jika sudah diretry 4 kali tetap gagal, baru dibatalkan
+                if (retryCount > 3) {
+                    await clearTrackingMessages(from);
+                    await adminSock.sendMessage(from, { text: `❌ Setup timeout setelah beberapa kali percobaan.\nSilakan ulangi *!tambahuser ${newBotId}*.` });
+                    activeSetups.delete(from);
+                    if (fs.existsSync(folderName)) fs.rmSync(folderName, { recursive: true, force: true });
+                    return;
+                }
+
+                const { state: clientState, saveCreds: clientSaveCreds } = await useMultiFileAuthState(folderName);
+
+                const setupSock = makeWASocket({
+                    version,
+                    auth: clientState,
+                    logger: pino({ level: 'silent' }),
+                    browser: [`Setup Bot ${newBotId}`, 'Chrome', '1.0.0'],
+                    getMessage: async () => ({ conversation: '' }),
+                    connectTimeoutMs: 60000,
+                    keepAliveIntervalMs: 10000
+                });
+
                 const setupData = activeSetups.get(from);
-                if (!setupData) return;
+                if (setupData) setupData.client = setupSock;
 
-                if (qr) {
-                    try {
-                        if (setupData.lastQrKey) {
-                            try { await adminSock.sendMessage(from, { delete: setupData.lastQrKey }); } catch(e) {}
+                setupSock.ev.on('creds.update', clientSaveCreds);
+
+                setupSock.ev.on('connection.update', async (update) => {
+                    const { connection, qr, lastDisconnect } = update;
+                    const currentSetup = activeSetups.get(from);
+                    
+                    if (!currentSetup) return; // Jika user sudah ketik !batal
+
+                    if (qr) {
+                        try {
+                            // Hapus QR lama sebelum kirim yang baru
+                            if (currentSetup.lastQrKey) {
+                                try { await adminSock.sendMessage(from, { delete: currentSetup.lastQrKey }); } catch(e) {}
+                            }
+                            
+                            currentSetup.qrCount++;
+                            const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
+                            
+                            const qrMsg = await adminSock.sendMessage(from, { 
+                                image: qrBuffer, 
+                                caption: `*QR LOGIN: bot${newBotId}* (Refresh ke-${currentSetup.qrCount})\n\nSilakan scan QR ini. QR akan berganti otomatis jika expired agar tidak gagal.\n_(Ketik *!batal* jika ingin membatalkan)_` 
+                            });
+                            
+                            currentSetup.lastQrKey = qrMsg.key;
+                            currentSetup.messagesToDelete.push(qrMsg.key);
+                        } catch (e) {
+                            console.error('Gagal mengirim QR:', e);
                         }
-
-                        const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
-                        
-                        const qrMsg = await adminSock.sendMessage(from, { 
-                            image: qrBuffer, 
-                            caption: `*QR LOGIN: bot${newBotId}*\n\nSilakan scan menggunakan HP pelanggan.\n\n_(Ketik *!batal* jika ingin membatalkan)_` 
-                        });
-                        
-                        setupData.lastQrKey = qrMsg.key;
-                        setupData.messagesToDelete.push(qrMsg.key);
-                    } catch (e) {
-                        console.error('Gagal mengirim QR:', e);
                     }
-                }
 
-                // ========================================================
-                // PERBAIKAN BUG: Jika Timeout / Gagal di tengah jalan
-                // ========================================================
-                if (connection === 'close') {
-                    await clearTrackingMessages(from);
-                    await adminSock.sendMessage(from, { text: `❌ Setup untuk *bot${newBotId}* gagal atau timeout.\nSilakan ulangi perintah *!tambahuser ${newBotId}*.` });
-                    activeSetups.delete(from);
-                    
-                    // Bersihkan folder agar siap diulang
-                    if (fs.existsSync(folderName)) {
-                        fs.rmSync(folderName, { recursive: true, force: true });
+                    if (connection === 'close') {
+                        const statusCode = lastDisconnect?.error?.output?.statusCode;
+                        
+                        // Jika koneksi putus tapi BUKAN karena logout/ditolak, lakukan reconnect otomatis
+                        if (statusCode !== DisconnectReason.loggedOut) {
+                            console.log(`[bot${newBotId}] Koneksi drop sementara. Auto-reconnect...`);
+                            setTimeout(() => connectSetupSocket(retryCount + 1), 2000);
+                        } else {
+                            // Jika ditolak/logout baru dibatalkan
+                            await clearTrackingMessages(from);
+                            await adminSock.sendMessage(from, { text: `❌ Setup dibatalkan atau ditolak perangkat.` });
+                            activeSetups.delete(from);
+                            if (fs.existsSync(folderName)) fs.rmSync(folderName, { recursive: true, force: true });
+                        }
                     }
-                }
 
-                if (connection === 'open') {
-                    await clearTrackingMessages(from);
-                    
-                    const successMsg = `*✅ SUKSES LOGIN!*\nSesi untuk *bot${newBotId}* telah tersimpan aman di server.\n\nSekarang jalankan bot pelanggan di terminal VPS:\n\n*BOT_ID=${newBotId} pm2 start wabot.js --name "wabot-${newBotId}"*`;
-                    
-                    await adminSock.sendMessage(from, { text: successMsg });
-                    
-                    activeSetups.delete(from);
-                    
-                    setTimeout(() => {
-                        try { setupSock.ws.close(); } catch(e) {}
-                    }, 2000);
-                }
-            });
+                    if (connection === 'open') {
+                        await clearTrackingMessages(from);
+                        const successMsg = `*✅ SUKSES LOGIN!*\nSesi untuk *bot${newBotId}* telah tersimpan aman.\n\nJalankan bot pelanggan di terminal VPS:\n*BOT_ID=${newBotId} pm2 start wabot.js --name "wabot-${newBotId}"*`;
+                        
+                        await adminSock.sendMessage(from, { text: successMsg });
+                        activeSetups.delete(from);
+                        
+                        setTimeout(() => {
+                            try { setupSock.ws.close(); } catch(e) {}
+                        }, 2000);
+                    }
+                });
+            }
+
+            // Panggil fungsi setup
+            connectSetupSocket();
         }
     });
 }
