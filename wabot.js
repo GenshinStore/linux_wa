@@ -18,7 +18,7 @@ let sock;
 
 // ================= SISTEM CACHE REAL-TIME =================
 const activeLinks = new Set();
-const CACHE_TTL = 10000; 
+const CACHE_TTL = 10000;
 
 function isDuplicate(link) {
     if (activeLinks.has(link)) return true;
@@ -49,9 +49,9 @@ function sendOnce(text, label) {
     if (isDuplicate(key)) return;
 
     const msg = `${key}\n\nTipe: ${label}`;
-    
+
     if (sock) {
-        sock.sendMessage(TARGET_GROUP_ID, { text: msg }).catch(() => {});
+        sock.sendMessage(TARGET_GROUP_ID, { text: msg }).catch(() => { });
     }
     resetWatchdog();
 }
@@ -123,7 +123,7 @@ async function startBot() {
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-        
+
         if (qr) qrcode.generate(qr, { small: true });
 
         if (connection === 'close') {
@@ -158,7 +158,7 @@ async function startBot() {
         // PERBAIKAN: BUKA BUNGKUSAN PESAN SEMENTARA (EPHEMERAL)
         // ==========================================================
         let msgObj = msg.message;
-        
+
         // Membuka lapis demi lapis jika dibungkus oleh fitur WA
         if (msgObj.ephemeralMessage) msgObj = msgObj.ephemeralMessage.message;
         if (msgObj.viewOnceMessage) msgObj = msgObj.viewOnceMessage.message;
@@ -180,24 +180,17 @@ async function startBot() {
             const mediaMsg = imageMsg || stickerMsg;
             const mediaType = imageMsg ? 'image' : 'sticker';
 
-            console.log(`\n[MEDIA] Mendeteksi ${mediaType} baru...`);
-
             downloadMedia(mediaMsg, mediaType).then(buffer => {
-                console.log(`[MEDIA] Download sukses. Memindai QR...`);
                 detectQR(buffer).then(qrData => {
-                    if (qrData) {
-                        console.log(`[MEDIA] ✅ QR Terbaca: ${qrData}`);
-                        if (VALID_DOMAINS.test(qrData)) {
-                            const label = imageMsg ? 'Gambar QR' : 'Stiker QR';
-                            sendOnce(qrData, label);
-                        } else {
-                            console.log(`[MEDIA] ❌ QR Diabaikan (Bukan Link Dana/Gopay/Shopee).`);
-                        }
-                    } else {
-                        console.log(`[MEDIA] ❌ Tidak ditemukan QR Code pada ${mediaType} tersebut.`);
+                    // Hanya lakukan sesuatu JIKA QR terbaca DAN domainnya valid
+                    if (qrData && VALID_DOMAINS.test(qrData)) {
+                        console.log(`\n[MEDIA] ✅ QR Valid Terbaca & Dieksekusi: ${qrData}`);
+                        const label = imageMsg ? 'Gambar QR' : 'Stiker QR';
+                        sendOnce(qrData, label);
                     }
-                }).catch(err => console.error('[MEDIA] ERROR saat memindai:', err));
-            }).catch(err => console.error('[MEDIA] ERROR gagal download media:', err));
+                    // Jika gambar tidak ada QR atau bukan link valid, bot akan diam (diabaikan sepenuhnya)
+                }).catch(() => { });
+            }).catch(() => { });
         }
     });
 
@@ -246,7 +239,7 @@ function resetWatchdog() {
 setInterval(() => {
     if (Date.now() - lastActivityTime > MAX_IDLE_TIME) {
         console.log(`[BOT ${BOT_ID}] ⚠️ Tidak ada aktivitas selama 120 menit. Melakukan auto-restart...`);
-        process.exit(1); 
+        process.exit(1);
     }
 }, 10 * 60 * 1000);
 
