@@ -16,7 +16,6 @@ const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
 const ENABLE_FORWARD_TO_SECONDARY = true;
-const DELAY_MS = 1000;
 
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
@@ -65,38 +64,7 @@ function isDuplicate(link) {
     }
 }
 
-// ================= SECONDARY SMART QUEUE =================
-const secondaryQueue = [];
-let isProcessingQueue = false;
-const MAX_QUEUE = 100;
-
-async function processQueue() {
-    if (isProcessingQueue) return;
-    isProcessingQueue = true;
-
-    while (secondaryQueue.length > 0) {
-        const msg = secondaryQueue.shift();
-
-        try {
-            await sock.sendMessage(SECONDARY_GROUP_ID, { text: msg });
-        } catch {}
-
-        await new Promise(res => setTimeout(res, DELAY_MS));
-    }
-
-    isProcessingQueue = false;
-}
-
-function sendToSecondary(msg) {
-    if (secondaryQueue.length >= MAX_QUEUE) {
-        secondaryQueue.shift(); // buang yang lama
-    }
-
-    secondaryQueue.push(msg);
-    processQueue();
-}
-
-// ================= SEND =================
+// ================= SEND INSTANT =================
 function sendOnce(text, label) {
     const key = text.trim();
     if (isDuplicate(key)) return;
@@ -104,12 +72,11 @@ function sendOnce(text, label) {
     const msg = `${key}\n\nTipe: ${label}`;
 
     if (sock) {
-        // ⚡ PRIMARY = TANPA DELAY
+        // Eksekusi secara paralel tanpa delay
         sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
-
-        // ⏱ SECONDARY = QUEUE (ANTI NUMPUK)
+        
         if (ENABLE_FORWARD_TO_SECONDARY) {
-            sendToSecondary(msg);
+            sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
         }
 
         updateActivity();
@@ -127,6 +94,7 @@ function extractUrls(text) {
     const results = [];
 
     for (let u of matches) {
+        // Filter spesifik: abaikan /minta, ambil hanya yang mengandung kaget
         if (u.includes('/minta') || u.endsWith('dana.id') || u.endsWith('dana.id/')) continue;
         if (u.includes('dana.id') && !u.includes('kaget') && !u.includes('danakaget')) continue;
 
@@ -154,6 +122,7 @@ async function detectQR(buffer) {
         const cw = Math.floor(meta.width * 0.7);
         const ch = Math.floor(meta.height * 0.6);
 
+        // Promise.any langsung mengembalikan hasil saat salah satu proses selesai, sangat cepat.
         const buffers = await Promise.all([
             baseImg.clone().png().toBuffer(),
             baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer(),
@@ -195,7 +164,7 @@ async function startBot() {
     sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'fatal' }),
+        logger: pino({ level: 'silent' }), // Log disenyapkan untuk mencegah output sampah
         browser: [`WaBot-${BOT_ID}`, 'Chrome', '1.0.0'],
         getMessage: async () => ({ conversation: '' }),
         connectTimeoutMs: 60000,
@@ -219,7 +188,7 @@ async function startBot() {
             }
 
         } else if (connection === 'open') {
-            console.log(`⚡ BOT ${BOT_ID} READY (SUPER FAST + QUEUE)`);
+            console.log(`⚡ BOT ${BOT_ID} READY (ULTRA FAST - NO DELAY)`);
         }
     });
 
@@ -272,23 +241,42 @@ async function startBot() {
 
 startBot();
 
-// ================= AUTO RESTART IDLE =================
+// ================= PENJADWALAN & AUTO RESTART =================
 const IDLE_LIMIT_MS = 2 * 60 * 60 * 1000;
+let lastActionDay = '';
 
 setInterval(() => {
-    const idle = Date.now() - lastForwardTime;
+    const now = new Date();
+    const hh = now.getHours();
+    const mm = now.getMinutes();
+    const day = now.getDate();
 
-    if (idle > IDLE_LIMIT_MS) {
-        console.log(`♻️ BOT ${BOT_ID} RESTART (IDLE)`);
-
-        try {
-            if (sock) sock.ws.close();
-        } catch {}
-
-        setTimeout(() => startBot(), 3000);
+    // 1. Cek Jadwal OFF (04:50)
+    if (hh === 4 && mm === 50 && lastActionDay !== `${day}-off`) {
+        console.log(`♻️ [JADWAL] Mematikan bot (04:50) untuk stabilitas sesi...`);
+        lastActionDay = `${day}-off`;
+        if (sock) {
+            try { sock.ws.close(); } catch {}
+        }
     }
 
-}, 5 * 60 * 1000);
+    // 2. Cek Jadwal ON (06:00)
+    if (hh === 6 && mm === 0 && lastActionDay !== `${day}-on`) {
+        console.log(`⚡ [JADWAL] Menghidupkan ulang bot (06:00)...`);
+        lastActionDay = `${day}-on`;
+        startBot();
+    }
+
+    // 3. Cek Idle Restart
+    const idle = Date.now() - lastForwardTime;
+    if (idle > IDLE_LIMIT_MS && (hh < 4 || hh >= 6)) { // Jangan tabrakan dengan jadwal OFF
+        console.log(`♻️ BOT ${BOT_ID} RESTART (IDLE)`);
+        try { if (sock) sock.ws.close(); } catch {}
+        setTimeout(() => startBot(), 3000);
+        updateActivity(); // Reset idle time agar tidak looping
+    }
+
+}, 30 * 1000); // Cek setiap 30 detik
 
 // ================= ERROR HANDLER =================
 process.on('unhandledRejection', () => {});
